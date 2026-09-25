@@ -1,17 +1,18 @@
-name: 編譯 L1J-3.8 啟動器
+name: 編譯 L1J-3.8 啟動器 (32+64位元)
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 允許手動觸發編譯
+  workflow_dispatch:  # 支援手動觸發
 
 jobs:
-  build-windows:
+  build-windows-x64:
     runs-on: windows-latest
+    name: 編譯 64 位元版本
     
     steps:
       - name: 下載程式碼
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安裝 Rust 工具鏈
         uses: dtolnay/rust-toolchain@stable
@@ -19,13 +20,46 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
+      - name: 設定靜態連結 C 執行庫
+        run: |
+          echo "RUSTFLAGS=-C target-feature=+crt-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: 編譯 Release 版本
-        run: cargo build --release
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: 打包輸出成品
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: L1J-3.8-launcher 成品
+          name: L1J-3.8-launcher 64位元成品
           path: |
-            target/release/launcher.exe
-            target/release/encoder.exe
+            target/x86_64-pc-windows-msvc/release/launcher.exe
+            target/x86_64-pc-windows-msvc/release/encoder.exe
+
+  build-windows-x86:
+    runs-on: windows-latest
+    name: 編譯 32 位元版本
+    
+    steps:
+      - name: 下載程式碼
+        uses: actions/checkout@v5
+
+      - name: 安裝 Rust 工具鏈
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: i686-pc-windows-msvc
+
+      - name: 設定靜態連結 C 執行庫
+        run: |
+          echo "RUSTFLAGS=-C target-feature=+crt-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: 編譯 Release 版本
+        run: cargo build --release --target i686-pc-windows-msvc
+
+      - name: 打包輸出成品
+        uses: actions/upload-artifact@v5
+        with:
+          name: L1J-3.8-launcher 32位元成品
+          path: |
+            target/i686-pc-windows-msvc/release/launcher.exe
+            target/i686-pc-windows-msvc/release/encoder.exe
