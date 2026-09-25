@@ -1,0 +1,31 @@
+name: 編譯 L1J-3.8 啟動器
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 允許手動觸發編譯
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: 下載程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Rust 工具鏈
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: 編譯 Release 版本
+        run: cargo build --release
+
+      - name: 打包輸出成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: L1J-3.8-launcher 成品
+          path: |
+            target/release/launcher.exe
+            target/release/encoder.exe
