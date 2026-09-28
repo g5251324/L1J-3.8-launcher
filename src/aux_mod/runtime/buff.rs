@@ -143,16 +143,21 @@ pub(super) fn buff_tick(
         match crate::aux::buff_dispatch::execute_buff_item(&ctx, buff) {
             crate::aux::buff_dispatch::DispatchOutcome::Done => {
                 cooldowns.insert(cd_key, now);
+                // 自訂狀態圖示 — 物品成功使用(USE_ITEM / II packet)後觸發
+                crate::aux::status_icons::on_buff_cast(buff.id, &buff.name);
             }
             crate::aux::buff_dispatch::DispatchOutcome::SkillCast => {
                 cooldowns.insert(cd_key, now);
                 skill_cast_this_tick = true;
+                // 自訂狀態圖示 — 技能成功送出施法 packet 後觸發
+                crate::aux::status_icons::on_buff_cast(buff.id, &buff.name);
             }
             crate::aux::buff_dispatch::DispatchOutcome::Skipped(reason) => {
                 // 對齊既有行為:dispatch 失敗也 cooldown 一下,避免下個 tick 立刻 spam log
                 // (原 buff_tick 在「背包找不到」/「spell lookup 失敗」都 cooldowns.insert)
                 cooldowns.insert(cd_key, now);
                 let _ = reason; // log 已在 dispatch 內印過
+                // Skipped = 沒有真的施放/使用 → 不觸發狀態圖示,避免顯示假 buff
             }
         }
     }
