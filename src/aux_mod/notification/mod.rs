@@ -62,6 +62,10 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// renderer 安裝失敗不算致命(packet path 還能跑,只是看不到 toast/float)。
 pub fn install(h: HANDLE, pid: u32, game_dir: &std::path::Path) -> Result<()> {
     packet_hook::install(h, pid)?;
+    // hook 封包版(方案2):攔截玩家施法/用物封包觸發自訂圖示 — 非致命,失敗不擋主流程
+    if let Err(e) = crate::aux::status_icons::hook::install(h, pid) {
+        log_line!("[status_hook] SendPacketData hook 安裝失敗(自訂圖示 hook 版停用): {e:#}");
+    }
     // Sprite.pak PNG 索引 — 失敗只 warning,overlay 退回色塊 placeholder。
     if let Err(e) = sprite_pak::init(game_dir) {
         log_line!("[notification] sprite_pak init 失敗(改用色塊 placeholder): {e:#}");
@@ -125,6 +129,9 @@ pub fn on_polling_tick(h: HANDLE, now: Instant, screen_w: i32, screen_h: i32) ->
             log_packet_diagnostic(p);
             on_packet_recv(p);
         }
+        // 1.5) hook 封包版(方案2)— 攔截玩家施法/用物封包 → 觸發自訂狀態圖示
+        let casts = crate::aux::status_icons::hook::drain(h);
+        crate::aux::status_icons::hook::dispatch(h, casts);
         // 2) tick queue
         let mut q = lock_queue();
         q.tick(now);
