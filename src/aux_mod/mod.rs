@@ -45,5 +45,6 @@ pub mod profile;
 pub mod show_clock_patch;
 pub mod spell_book;
 pub mod spell_db;
+pub mod status_icons;
 pub mod use_item_spy;
 pub mod window_rename;
