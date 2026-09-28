@@ -1,27 +1,32 @@
-//! 自訂狀態圖示 — 登入器自繪覆層(方案 1:auto-buff 觸發)。
+//! 自訂狀態圖示 — 登入器自繪覆層(方案 1:auto-buff 觸發 + 方案 2:hook 封包觸發)。
 //!
 //! 與遊戲內建狀態欄**完全脫鉤**:
 //! - 內建技能有沒有狀態圖示都不影響 — 圖示是登入器自己畫的
-//! - 觸發來源:auto-buff(LHX「輔助」分頁)每次**成功**施放/使用 buff 時呼叫
-//!   [`on_buff_cast`];失敗/跳過(Skipped)不觸發,避免顯示「沒放到」的假圖示
+//! - 觸發來源有二:
+//!   * auto-buff(LHX「輔助」分頁)每次**成功**施放/使用 buff 時呼叫
+//!     [`on_buff_cast`];失敗/跳過(Skipped)不觸發,避免顯示「沒放到」的假圖示
+//!   * hook 封包([`hook`])攔截 `SendPacketData`,任何**手動**施法/用物也會觸發
+//!     ([`on_skill_cast`] / [`on_item_cast`])— 解決「auto-buff 沒補就沒圖示」的痛點
 //! - 顯示:併入 `notification` overlay 視窗,左上角垂直堆疊(最多 3 槽)
 //!
 //! 資料流:
 //! ```text
-//!   buff_tick ── execute_buff_item 回 Done/SkillCast ──> on_buff_cast(state_id, name)
+//! buff_tick ── execute_buff_item 回 Done/SkillCast ──> on_buff_cast(state_id, name)
+//! SendPacketData hook ── drain ──> on_skill_cast(packed,name) / on_item_cast(name)
 //!        │                                                    │
 //!        │                                             查 status_icons.ini 規則
 //!        │                                                    │
-//!        │                                         啟用槽位 + lazy 載入 PNG + 計時
+//!        │                                         啟用槽位 + lazy 載入圖檔 + 計時
 //!        ▼                                                    ▼
 //!   notification::on_polling_tick(30ms) ── snapshot(now) ──> overlay 渲染
 //! ```
 //!
-//! 執行緒模型:`on_buff_cast` 在 timer_buff polling thread 跑,`snapshot` 在
-//! notification polling thread 跑,共用 `CONTROLLER`(Mutex)同步;兩個都是低頻
-//! (500ms / 30ms),lock 爭用可忽略。
+//! 執行緒模型:觸發端(auto-buff 在 timer_buff polling thread,hook 在 notification
+//! polling thread)與 `snapshot`(notification polling thread)共用 `CONTROLLER`
+//! (Mutex)同步;都是低頻(500ms / 30ms),lock 爭用可忽略。
 
 mod config;
+pub mod hook;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -70,13 +75,23 @@ impl Controller {
     /// buff 施放成功 → 找命中規則,啟用對應槽位(重複觸發 = 覆蓋並重置計時)。
     fn on_buff_cast(&mut self, state_id: i32, name: &str) {
         // 依槽位順序找第一個命中 — 同一 buff 命中多條時先宣告的先贏
-        let Some(slot) = self
-            .rules
-            .iter()
-            .position(|r| r.trigger.matches(state_id, name))
-        else {
-            return; // 沒有規則命中,靜默(不需要 log — 未設定就是關閉)
-        };
+        if let Some(slot) = self.rules.iter().position(|r| r.trigger.matches(state_id, name)) {
+            self.activate(slot, state_id, name);
+        }
+    }
+
+    /// hook 封包版 — 依「名稱 + 是否用物」找命中規則。
+    /// 回傳是否命中(供 log packed 診斷)。
+    fn on_cast(&mut self, name: &str, is_item: bool) -> bool {
+        if let Some(slot) = self.rules.iter().position(|r| r.trigger.matches_cast(name, is_item)) {
+            self.activate(slot, -1, name); // hook 版沒有 state_id,記 -1
+            return true;
+        }
+        false
+    }
+
+    /// 啟用一個槽位(載入圖檔 + 設定計時 + log)。共用的實際觸發點。
+    fn activate(&mut self, slot: usize, state_id: i32, name: &str) {
         let rule = &self.rules[slot];
         let icon = self.load_icon(&rule.icon_file);
         let until = if rule.duration_sec == 0 {
@@ -185,6 +200,27 @@ pub fn on_buff_cast(state_id: i32, name: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     c.on_buff_cast(state_id, name);
+}
+
+/// hook 封包版 — 玩家施放技能時由 [`hook::dispatch`] 呼叫。
+/// `packed` = 技能 packed id,`name` = 反查出的技能名稱(僅用於命中比對 + 診斷)。
+pub fn on_skill_cast(packed: u32, name: &str) {
+    let mut c = controller()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if c.on_cast(name, false) {
+        log_line!("[status_hook] 施法命中: name={name} (packed=0x{packed:X})");
+    }
+}
+
+/// hook 封包版 — 玩家使用物品時由 [`hook::dispatch`] 呼叫。
+pub fn on_item_cast(name: &str) {
+    let mut c = controller()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if c.on_cast(name, true) {
+        log_line!("[status_hook] 用物命中: name={name}");
+    }
 }
 
 /// notification polling thread 呼叫 — 產出 overlay 渲染用的 view 列表。
@@ -302,5 +338,44 @@ mod tests {
         // slot1(60s)還在,slot2(1s)已過期
         let views = c.snapshot(later);
         assert_eq!(views.len(), 1);
+    }
+
+    #[test]
+    fn skill_trigger_activates_on_skill_cast_only() {
+        let mut c = test_controller(vec![StatusIconRule {
+            trigger: Trigger::Skill("烈炎術".into()),
+            duration_sec: 60,
+            ..Default::default()
+        }]);
+        // 用物品同名 → 不命中
+        assert!(!c.on_cast("烈炎術", true));
+        // 施法 → 命中
+        assert!(c.on_cast("烈炎術", false));
+        assert_eq!(c.snapshot(Instant::now()).len(), 1);
+    }
+
+    #[test]
+    fn item_trigger_activates_on_item_cast_only() {
+        let mut c = test_controller(vec![StatusIconRule {
+            trigger: Trigger::Item("自我加速藥水".into()),
+            duration_sec: 60,
+            ..Default::default()
+        }]);
+        assert!(!c.on_cast("自我加速藥水", false));
+        assert!(c.on_cast("自我加速藥水", true));
+        assert_eq!(c.snapshot(Instant::now()).len(), 1);
+    }
+
+    #[test]
+    fn name_trigger_activates_on_both_buff_and_cast() {
+        let mut c = test_controller(vec![StatusIconRule {
+            trigger: Trigger::Name("加速術".into()),
+            duration_sec: 60,
+            ..Default::default()
+        }]);
+        c.on_buff_cast(0, "加速術"); // auto-buff
+        assert_eq!(c.snapshot(Instant::now()).len(), 1);
+        c.on_cast("加速術", false); // 手動施法 → 重置計時,仍顯示
+        assert_eq!(c.snapshot(Instant::now()).len(), 1);
     }
 }

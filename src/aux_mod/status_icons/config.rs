@@ -11,35 +11,53 @@
 //! label    = 加速           ; 圖示旁的文字,空 = 不畫
 //! ```
 //!
-//! `trigger` 兩種寫法:
-//! - `state:<id>` — 依 buff 效果類別 id 觸發(多個同類 buff 共用一個圖示;
-//!   例如 id=0 是加速類,加速術 / 自我加速藥水都會命中)
-//! - `name:<名稱>` — 依 buff 條目名稱觸發(更精確,可區分不同技能/物品;
-//!   名稱需與 LHX 輔助分頁裡的乾淨名稱一致,例如 `加速術`)
+//! `trigger` 四種寫法:
+//! - `state:<id>` — 依 buff 效果類別 id 觸發(只對 auto-buff 版有效;
+//!   多個同類 buff 共用一個圖示,例如 id=0 是加速類)
+//! - `name:<名稱>` — 依名稱觸發(通用;auto-buff 對 buff 名稱,hook 版對技能/物品名稱)
+//! - `skill:<名稱>` — 只對「玩家施放的技能」名稱觸發(hook 封包版)
+//! - `item:<名稱>` — 只對「玩家使用的物品」名稱觸發(hook 封包版)
 //!
-//! 為什麼 trigger 對齊「效果類別 id / buff 名稱」而非技能本身 id:
+//! 為什麼 trigger 對齊「效果類別 id / 名稱」而非技能本身 id:
 //! auto-buff 路徑的觸發點是 `buff_tick`,它拿到的 key 就是 `BuffItem.id`
 //! (state_id)與 `BuffItem.name`,沒有技能本身 id;要拿到技能 id 得走 packet
-//! hook 路徑(方案 2),本模組的 `Trigger` 已為後續擴充預留空間。
+//! hook 路徑(方案 2),`skill:` / `item:` 就是為 hook 版設計的。
 
 use crate::log_line;
 
-/// 觸發條件 — 決定哪一次 buff cast 會啟用對應槽位。
+/// 觸發條件 — 決定哪一次 cast 會啟用對應槽位。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Trigger {
-    /// `state:<id>` — 效果類別 id(對齊 `buff_tick` 的 `buff.id`)
+    /// `state:<id>` — 效果類別 id(只對齊 `buff_tick` 的 `buff.id`,auto-buff 版)
     StateId(i32),
-    /// `name:<名稱>` — buff 條目乾淨名稱(對齊 `BuffItem.name`)
+    /// `name:<名稱>` — 通用名稱(buff 名稱 / 技能名稱 / 物品名稱皆可命中)
     Name(String),
+    /// `skill:<名稱>` — 只對「玩家施放技能」名稱觸發(hook 封包版)
+    Skill(String),
+    /// `item:<名稱>` — 只對「玩家使用物品」名稱觸發(hook 封包版)
+    Item(String),
 }
 
 impl Trigger {
-    /// 比對一次 buff cast — state 或 name 任一命中即算。
-    /// `buff_tick` 只傳得到這兩個值,所以比對面只限這兩者。
+    /// 比對一次 **auto-buff** cast — state 或 name 任一命中即算。
+    /// `buff_tick` 只傳得到這兩個值,所以比對面只限這兩者;
+    /// `Skill`/`Item` 沒有 state_id 可對,在此永不命中(由 `matches_cast` 處理)。
     pub fn matches(&self, state_id: i32, name: &str) -> bool {
         match self {
             Trigger::StateId(id) => *id == state_id,
             Trigger::Name(n) => n == name,
+            Trigger::Skill(_) | Trigger::Item(_) => false,
+        }
+    }
+
+    /// 比對一次 **hook 封包** cast — 依名稱,`is_item=true` 表示這次是用物品。
+    /// `StateId` 拿不到效果類別 id,在此永不命中(由 `matches` 處理 auto-buff)。
+    pub fn matches_cast(&self, name: &str, is_item: bool) -> bool {
+        match self {
+            Trigger::StateId(_) => false,
+            Trigger::Name(n) => n == name,
+            Trigger::Skill(n) => !is_item && n == name,
+            Trigger::Item(n) => is_item && n == name,
         }
     }
 }
@@ -142,7 +160,8 @@ pub fn parse(text: &str) -> StatusIconConfig {
     cfg
 }
 
-/// 解析 `trigger` 值 — `state:<id>` / `name:<名稱>`;兩者都不像 → 無效 sentinel。
+/// 解析 `trigger` 值 — `state:<id>` / `name:<名稱>` / `skill:<名稱>` / `item:<名稱>`;
+/// 都不像 → 無效 sentinel。
 fn parse_trigger(v: &str) -> Trigger {
     let v = v.trim();
     if let Some(id) = v.strip_prefix("state:") {
@@ -150,10 +169,16 @@ fn parse_trigger(v: &str) -> Trigger {
             return Trigger::StateId(id);
         }
     }
-    if let Some(name) = v.strip_prefix("name:") {
-        let name = name.trim();
-        if !name.is_empty() {
-            return Trigger::Name(name.to_string());
+    for (prefix, make) in [
+        ("name:", Trigger::Name as fn(String) -> Trigger),
+        ("skill:", Trigger::Skill),
+        ("item:", Trigger::Item),
+    ] {
+        if let Some(name) = v.strip_prefix(prefix) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return make(name.to_string());
+            }
         }
     }
     Trigger::StateId(-1) // 永不命中(id 負值在 buff_tick 已被擋掉)
@@ -262,5 +287,43 @@ label = 通暢
         let t = Trigger::StateId(0);
         assert!(t.matches(0, "任何名稱"));
         assert!(!t.matches(2, "任何名稱"));
+    }
+
+    #[test]
+    fn parse_skill_and_item_triggers() {
+        let cfg = parse("[slot1]\ntrigger = skill:烈炎術\n[slot2]\ntrigger = item:自我加速藥水\n");
+        assert_eq!(cfg.rules.len(), 2);
+        assert_eq!(cfg.rules[0].trigger, Trigger::Skill("烈炎術".into()));
+        assert_eq!(cfg.rules[1].trigger, Trigger::Item("自我加速藥水".into()));
+    }
+
+    #[test]
+    fn skill_trigger_matches_only_skill_not_item() {
+        let t = Trigger::Skill("烈炎術".into());
+        assert!(t.matches_cast("烈炎術", false)); // 施法
+        assert!(!t.matches_cast("烈炎術", true)); // 用物同名不命中
+        assert!(!t.matches("0", "烈炎術")); // auto-buff 面不命中
+    }
+
+    #[test]
+    fn item_trigger_matches_only_item() {
+        let t = Trigger::Item("自我加速藥水".into());
+        assert!(t.matches_cast("自我加速藥水", true));
+        assert!(!t.matches_cast("自我加速藥水", false));
+    }
+
+    #[test]
+    fn name_trigger_matches_both_skill_and_item() {
+        let t = Trigger::Name("加速術".into());
+        assert!(t.matches_cast("加速術", false));
+        assert!(t.matches_cast("加速術", true));
+        assert!(t.matches(0, "加速術")); // auto-buff 面也命中
+    }
+
+    #[test]
+    fn state_trigger_never_matches_cast() {
+        let t = Trigger::StateId(0);
+        assert!(!t.matches_cast("加速術", false));
+        assert!(!t.matches_cast("加速術", true));
     }
 }
