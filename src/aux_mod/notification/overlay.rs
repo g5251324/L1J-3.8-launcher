@@ -43,6 +43,8 @@ use super::types::{with_commas, FloatKind};
 pub struct Snapshot {
     pub toasts: Vec<ToastView>,
     pub floats: Vec<FloatView>,
+    /// 自訂狀態圖示(status_icons 控制器產出;空 = 不畫)
+    pub status_icons: Vec<StatusIconView>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,14 @@ pub struct FloatView {
     pub cascade_offset: u8,
 }
 
+/// 自訂狀態圖示 view — `status_icons` 控制器產出,overlay 只負責畫。
+/// `icon` 為 None 時畫色塊 fallback(設定存在但 PNG 缺)。
+#[derive(Clone)]
+pub struct StatusIconView {
+    pub icon: Option<Arc<DecodedPng>>,
+    pub label: String,
+}
+
 static SNAPSHOT: Lazy<Mutex<Snapshot>> = Lazy::new(|| Mutex::new(Snapshot::default()));
 static OVERLAY_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -74,6 +84,10 @@ const TOAST_LIFE_MS: u32 = 5000;
 
 const FLOAT_LIFE_MS: u32 = 1500;
 const FLOAT_DRIFT_PX: i32 = 60;
+
+// 自訂狀態圖示排版常數
+const STATUS_ICON_H: i32 = 20; // 垂直堆疊間距基準(實際 PNG 可能更高,以自然高度畫)
+const STATUS_ICON_GAP: i32 = 6;
 
 /// 由 sprite_pak 載入的 PNG 圖示;失敗 → None → fallback 色塊。
 /// 用 Arc 共享:render loop 每 frame clone Arc 而非 clone Vec<u8> pixel data。
@@ -615,6 +629,43 @@ fn render(gdi: &mut GdiState, snap: &Snapshot) {
     gdi.clear();
     let buf_w = gdi.width;
     let buf_h = gdi.height;
+
+    // 自訂狀態圖示 — 左上角垂直堆疊(遊戲 buff 圖示慣用位置,比例式錨點)。
+    // 每個槽位一張 PNG + 右側 label;PNG 缺(icon=None)畫色塊 fallback,
+    // 讓使用者一眼看出「槽位有觸發但圖檔沒放好」。
+    let status_origin_x: i32 = (buf_w * 4) / 100; // ~4% from left
+    let status_origin_y: i32 = (buf_h * 10) / 100; // ~10% from top
+
+    for (i, s) in snap.status_icons.iter().enumerate() {
+        if i >= 3 {
+            break; // 最多 3 槽(對齊 MAX_SLOTS)
+        }
+        let x = status_origin_x;
+        let y = status_origin_y + i as i32 * (STATUS_ICON_H + STATUS_ICON_GAP);
+
+        if let Some(png) = &s.icon {
+            // 有圖 — 畫 PNG + 右側 label
+            gdi.blit_png(png, x, y, 255);
+            if !s.label.is_empty() {
+                let text_x = x + png.width as i32 + 4;
+                let text_y = y + (png.height as i32 - 16) / 2;
+                gdi.draw_text(&s.label, text_x + 1, text_y + 1, 0xFF000000);
+                gdi.draw_text(&s.label, text_x, text_y, 0xFFFFFFFF);
+                gdi.force_alpha(text_x, text_y, 160, 22, 255);
+            }
+        } else {
+            // 無圖 fallback — 藍色色塊,label 照畫
+            const FALLBACK_W: i32 = 20;
+            gdi.fill_rect(x, y, FALLBACK_W, STATUS_ICON_H, 0xFF3A6EA5);
+            if !s.label.is_empty() {
+                let text_x = x + FALLBACK_W + 4;
+                let text_y = y + (STATUS_ICON_H - 16) / 2;
+                gdi.draw_text(&s.label, text_x + 1, text_y + 1, 0xFF000000);
+                gdi.draw_text(&s.label, text_x, text_y, 0xFFFFFFFF);
+                gdi.force_alpha(text_x, text_y, 160, 22, 255);
+            }
+        }
+    }
 
     // Toast 從左下角往上 stack — 比例式錨點,跨解析度自適應。
     // 71% from top ≈ 800x600 的 buf_h-170 與 1200x900 的 buf_h-260 兩個實測甜蜜點。

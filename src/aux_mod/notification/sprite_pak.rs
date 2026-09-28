@@ -185,6 +185,16 @@ fn load_png_internal(filename: &str, auto_key: bool) -> Option<DecodedPng> {
     decoded
 }
 
+/// 直接 decode 磁碟上一個 PNG 檔 → `DecodedPng`(自訂狀態圖示用)。
+///
+/// 為什麼放這裡:共用 `png` decode + `DecodedPng` 型別,status_icons 不需要
+/// 重寫一份 decoder。auto_key=true 讓「黑底無 alpha」的 Lineage 風格 sprite
+/// 也能正確透明化;一般 RGBA PNG 帶真實 alpha 時 auto_key 不會誤觸發。
+pub(crate) fn decode_png_file(path: &std::path::Path) -> Option<DecodedPng> {
+    let f = std::fs::File::open(path).ok()?;
+    decode_png_stream(std::io::BufReader::new(f), /*auto_key=*/ true)
+}
+
 /// 對應一張黑底 + 一張白底 PNG,用 paired-sprite alpha extraction 還原 straight alpha + RGB。
 /// 公式:per channel `alpha = 255 - (white - black)`,straight RGB 取 black / alpha。
 /// 用三通道 min(alpha) 當最終 alpha,避免邊緣半透明像素被誤判全不透明。

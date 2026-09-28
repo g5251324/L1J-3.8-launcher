@@ -160,6 +160,8 @@ pub fn on_polling_tick(h: HANDLE, now: Instant, screen_w: i32, screen_h: i32) ->
         overlay::write_snapshot(overlay::Snapshot {
             toasts: toast_views,
             floats: float_views,
+            // 自訂狀態圖示 — 由 status_icons 控制器產出(30ms 級刷新,過期自動消失)
+            status_icons: crate::aux::status_icons::snapshot(now),
         });
 
         cmds
