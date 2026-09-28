@@ -75,6 +75,21 @@ pub fn get_icon(gfxid: u16) -> Option<Arc<DecodedPng>> {
     CACHE.lock().ok()?.get(&gfxid).cloned()
 }
 
+/// 從磁碟讀 `.tbt` / `.img`(L1 image format)→ `DecodedPng`。
+///
+/// 供 `status_icons` 自訂狀態圖示使用 — 直接吃 `tile.pak` 解包出來的檔,
+/// 可套用遊戲原生圖示(不用另外轉 PNG)。`DecodedPng` 與 overlay 渲染共用,
+/// 檔缺 / 格式錯回 None。
+pub(crate) fn decode_file_to_png(path: &std::path::Path) -> Option<DecodedPng> {
+    let buf = std::fs::read(path).ok()?;
+    let (rgba, w, h) = decode_tbt(&buf)?;
+    Some(DecodedPng {
+        width: w,
+        height: h,
+        rgba,
+    })
+}
+
 fn load_and_render(gfxid: u16) -> Result<Arc<DecodedPng>> {
     use anyhow::{anyhow, Context};
     let filename = format!("{gfxid}.tbt");
