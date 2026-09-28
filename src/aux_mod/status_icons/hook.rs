@@ -240,7 +240,14 @@ pub fn build_shellcode(cave: u32, orig: &[u8; RELOC_LEN]) -> Vec<u8> {
 /// 裝 hook — 把 `SendPacketData` 入口改成 JMP 到 codecave。
 /// 已安裝過(module-state 有值)就直接 return,避免重複。
 pub fn install(h: HANDLE, pid: u32) -> Result<()> {
-    if HOOK_STATE.lock().ok().and_then(|s| s.as_ref()).is_some() {
+    // 已裝過就直接 return。注意:不能用 `.and_then(|s| s.as_ref())` 回傳 guard 內的
+    // 參考 — MutexGuard 在 closure 結束就釋放,參考會懸空(E0515);這裡只回傳
+    // 擁有的 bool(`g.is_some()` 經 auto-deref 呼叫,回傳值不 borrow guard)。
+    let already = HOOK_STATE
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    if already {
         log_line!("[status_hook] SendPacketData hook 已裝,略過");
         return Ok(());
     }
@@ -293,11 +300,15 @@ pub fn install(h: HANDLE, pid: u32) -> Result<()> {
 /// 拆 hook(還原原 8 bytes)。診斷 / 關閉時用。
 #[allow(dead_code)]
 pub fn uninstall(h: HANDLE) -> Result<()> {
-    let (cave_addr, orig_bytes) = match HOOK_STATE.lock().ok().and_then(|s| s.as_ref()) {
-        Some(x) => (x.cave_addr, x.orig_bytes),
-        None => return Ok(()),
+    // 只在 closure 內拷貝出擁有的欄位(cave_addr: u32、orig_bytes: [u8;8] 都是 Copy),
+    // 不把 guard 內部的參考帶出 closure,避免 E0515。
+    let saved = HOOK_STATE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|x| (x.cave_addr, x.orig_bytes)));
+    let Some((_cave_addr, orig_bytes)) = saved else {
+        return Ok(()); // 沒裝過,無事可拆
     };
-    let _ = cave_addr;
     memory::write_code(h, SEND_PACKET_DATA, &orig_bytes).context("還原原 bytes 失敗")?;
     if let Ok(mut state) = HOOK_STATE.lock() {
         *state = None;
