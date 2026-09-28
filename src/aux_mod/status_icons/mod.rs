@@ -119,13 +119,31 @@ impl Controller {
             .collect()
     }
 
-    /// lazy 載入槽位 PNG — 檔缺只回 None(overlay 畫色塊),不重試不 spam。
+    /// lazy 載入槽位圖檔 — 依副檔名選 decoder:
+    /// - `.png` → PNG decoder(`sprite_pak`)
+    /// - `.tbt` / `.img` → L1 image decoder(`tbt`),可直接吃 `tile.pak` 解包的原生圖
+    /// 其他格式 / 檔缺 → None(overlay 畫色塊),不重試不 spam。
     fn load_icon(&self, file: &str) -> Option<std::sync::Arc<DecodedPng>> {
         if file.is_empty() {
             return None;
         }
         let path = self.icons_dir.join(file);
-        sprite_pak::decode_png_file(&path).map(std::sync::Arc::new)
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "png" => sprite_pak::decode_png_file(&path).map(std::sync::Arc::new),
+            "tbt" | "img" => crate::aux::notification::tbt::decode_file_to_png(&path)
+                .map(std::sync::Arc::new),
+            other => {
+                log_line!(
+                    "[status_icons] 不支援的圖檔副檔名 .{other}(支援 .png / .tbt / .img)"
+                );
+                None
+            }
+        }
     }
 }
 
